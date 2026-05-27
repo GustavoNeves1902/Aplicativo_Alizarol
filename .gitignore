@@ -1,0 +1,27 @@
+# Flutter
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Android
+android/.gradle/
+android/app/build/
+
+# iOS / Mac
+ios/Pods/
+macos/Pods/
+
+# IDE
+.idea/
+.vscode/
+
+# modelos grandes
+assets/models/*.tflite
+
+# Misc
+*.log
+script_treino/evaluate_model.py
+script_treino/findind_circles_01.py
+script_treino/train_CNN.py
