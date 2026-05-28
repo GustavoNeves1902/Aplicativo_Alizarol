@@ -20,6 +20,24 @@ const double _kGuideFraction = 0.78;
 /// - Quando o modelo classifica o frame como "padrão" (prob ≥ 0.50), a foto
 ///   é tirada automaticamente.
 /// - O botão manual de captura permanece disponível como fallback.
+/// Resultado retornado pela CameraScreen ao pai.
+/// Contém o caminho da foto E os metadados necessários para calcular o recorte exato.
+class CameraCaptureResult {
+  final String path;
+  final double previewWidth;  // largura do preview da câmera (landscape)
+  final double previewHeight; // altura do preview da câmera (landscape)
+  final double screenWidth;   // largura da tela no momento da captura
+  final double screenHeight;  // altura da tela no momento da captura
+
+  const CameraCaptureResult({
+    required this.path,
+    required this.previewWidth,
+    required this.previewHeight,
+    required this.screenWidth,
+    required this.screenHeight,
+  });
+}
+
 class CameraScreen extends StatefulWidget {
   final Function(String) onImageCaptured;
   const CameraScreen({super.key, required this.onImageCaptured});
@@ -267,6 +285,20 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  /// Monta o resultado de captura com os metadados de preview e tela.
+  CameraCaptureResult _buildResult(String path, BuildContext ctx) {
+    final size = MediaQuery.of(ctx).size;
+    final preview = _controller!.value.previewSize;
+    return CameraCaptureResult(
+      path: path,
+      // previewSize reporta em landscape; mantemos como-está (height=largura real, width=altura real)
+      previewWidth: preview?.height ?? size.width,
+      previewHeight: preview?.width ?? size.height,
+      screenWidth: size.width,
+      screenHeight: size.height,
+    );
+  }
+
   /// Captura automática: para o stream e tira a foto.
   Future<void> _captureAuto() async {
     if (_capturing || _controller == null || !_initialized) return;
@@ -274,7 +306,7 @@ class _CameraScreenState extends State<CameraScreen>
     try {
       await _controller!.stopImageStream();
       final XFile file = await _controller!.takePicture();
-      if (mounted) Navigator.pop(context, file.path);
+      if (mounted) Navigator.pop<CameraCaptureResult>(context, _buildResult(file.path, context));
     } catch (e) {
       print('[AutoCapture] Erro na captura automática: $e');
       if (mounted)
@@ -295,7 +327,7 @@ class _CameraScreenState extends State<CameraScreen>
         await _controller!.stopImageStream();
       } catch (_) {}
       final XFile file = await _controller!.takePicture();
-      if (mounted) Navigator.pop(context, file.path);
+      if (mounted) Navigator.pop<CameraCaptureResult>(context, _buildResult(file.path, context));
     } catch (e) {
       print('[Camera] Erro ao capturar: $e');
       if (mounted) setState(() => _capturing = false);

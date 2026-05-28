@@ -28,45 +28,155 @@ class _PreparedAnalysisImage {
   });
 }
 
-/// Prepara imagens da Câmera: faz um recorte matemático exato da área do círculo guia,
-/// garantindo que a foto no dashboard seja apenas a placa, sem usar o OpenCV.
-_PreparedAnalysisImage _prepareCameraImage(Uint8List bytes) {
+/// Dados de entrada para o Isolate de preparo da imagem da câmera.
+/// Necessário porque [compute()] só aceita um argumento.
+class _CameraImageArgs {
+  final Uint8List bytes;
+  final double previewWidth;
+  final double previewHeight;
+  final double screenWidth;
+  final double screenHeight;
+
+  const _CameraImageArgs({
+    required this.bytes,
+    required this.previewWidth,
+    required this.previewHeight,
+    required this.screenWidth,
+    required this.screenHeight,
+  });
+}
+
+/// Wrapper top-level chamado via [compute()] para desempacotar os args.
+_PreparedAnalysisImage _computeCameraImage(_CameraImageArgs args) {
+  return _prepareCameraImage(
+    args.bytes,
+    previewWidth: args.previewWidth,
+    previewHeight: args.previewHeight,
+    screenWidth: args.screenWidth,
+    screenHeight: args.screenHeight,
+  );
+}
+
+/// Prepara imagens da Câmera com recorte EXATO correspondente ao círculo guia.
+///
+/// O preview usa [BoxFit.cover]: a imagem da câmera é ampliada para cobrir
+/// toda a tela, e as bordas que ultrapassam são CORTADAS (não visíveis).
+/// A foto salva por [takePicture()] é a imagem COMPLETA (sem o corte do BoxFit),
+/// então precisamos reproduzir esse corte matematicamente antes de recortar o círculo.
+///
+/// Fluxo:
+///   1. Calcular o fator de escala do BoxFit.cover (como o preview foi ampliado).
+///   2. Calcular a área da foto que ficou visível na tela.
+///   3. Mapear as coordenadas do círculo guia (em pixels de tela) para pixels da foto.
+///   4. Recortar essa região.
+_PreparedAnalysisImage _prepareCameraImage(
+  Uint8List bytes, {
+  double previewWidth = 0,
+  double previewHeight = 0,
+  double screenWidth = 0,
+  double screenHeight = 0,
+}) {
   final decoded = img.decodeImage(bytes);
   if (decoded == null) {
     throw Exception('Não foi possível decodificar a imagem.');
   }
 
-  // Na UI da câmera, o círculo tem diâmetro de 78% do menor lado da tela.
-  // Vamos aplicar a mesma proporção para recortar a foto original.
-  final minDim = min(decoded.width, decoded.height);
-  final cropSize = (minDim * 0.78).toInt();
-  
-  final x = (decoded.width - cropSize) ~/ 2;
-  final y = (decoded.height - cropSize) ~/ 2;
-  
-  // Adiciona um leve padding ao redor do recorte para segurança (ex: 5%)
-  final padding = (minDim * 0.05).toInt();
-  final xMin = max(0, x - padding);
-  final yMin = max(0, y - padding);
-  final xMax = min(decoded.width, x + cropSize + padding);
-  final yMax = min(decoded.height, y + cropSize + padding);
-  
-  final croppedImage = img.copyCrop(
+  // === Calcular o recorte considerando BoxFit.cover ===
+  //
+  // O CameraPreview mostra o preview em orientacão "natural" (portrait no Android),
+  // mas internamente o sensor é landscape. A foto salva é corretamente rotacionada
+  // pelo plugin (portrait: decoded.width < decoded.height).
+  //
+  // Se não temos os metadados, cai no cálculo simples (78% do menor lado).
+  int cropX, cropY, cropSize;
+
+  if (previewWidth > 0 && previewHeight > 0 && screenWidth > 0 && screenHeight > 0) {
+    // Aspect ratio da foto (já rotacionada corretamente para portrait)
+    final double photoW = decoded.width.toDouble();
+    final double photoH = decoded.height.toDouble();
+
+    // Aspect ratio do preview da câmera em portrait
+    // (previewWidth e previewHeight já estão ajustados para portrait em _buildResult)
+    final double previewAR = previewWidth / previewHeight;
+    final double screenAR = screenWidth / screenHeight;
+
+    // BoxFit.cover: escala para cobrir a tela inteira.
+    // Se o preview for mais "largo" que a tela: escala pela altura, corta largura.
+    // Se o preview for mais "estreito" que a tela: escala pela largura, corta altura.
+    double visibleW, visibleH; // fração da foto que foi visível na tela
+    if (previewAR > screenAR) {
+      // Preview mais largo: encaixa pela altura, corta laterais
+      final scale = screenHeight / previewHeight;
+      visibleW = screenWidth / scale;   // largura visível no espaço do preview
+      visibleH = previewHeight;          // altura total visível
+    } else {
+      // Preview mais estreito: encaixa pela largura, corta topo/baixo
+      final scale = screenWidth / previewWidth;
+      visibleW = previewWidth;           // largura total visível
+      visibleH = screenHeight / scale;  // altura visível no espaço do preview
+    }
+
+    // Converter de coordenadas do preview para coordenadas da foto.
+    // A foto e o preview têm o mesmo conteúdo, apenas escalonado.
+    final double scalePhotoToPreview = photoW / previewWidth;
+    final double visiblePhotoW = visibleW * scalePhotoToPreview;
+    final double visiblePhotoH = visibleH * scalePhotoToPreview;
+
+    // O círculo guia tem diâmetro = 78% do menor lado da TELA.
+    // Precisamos converter esse diâmetro para pixels da foto.
+    const double kGuideFraction = 0.78;
+    final double guideDiameterScreen = kGuideFraction * screenWidth.toDouble(); // menor lado = largura em portrait
+    // Fator de conversão: pixels de tela → pixels de foto (via preview)
+    final double screenToPhoto = visiblePhotoW / screenWidth;
+    final double guideDiameterPhoto = guideDiameterScreen * screenToPhoto;
+
+    cropSize = guideDiameterPhoto.toInt().clamp(1, decoded.width);
+    cropX = ((photoW - cropSize) / 2).toInt().clamp(0, decoded.width - cropSize);
+    cropY = ((photoH - cropSize) / 2).toInt().clamp(0, decoded.height - cropSize);
+
+    print('[CameraCrop] foto=${photoW.toInt()}x${photoH.toInt()} '
+        'preview=${previewWidth.toInt()}x${previewHeight.toInt()} '
+        'tela=${screenWidth.toInt()}x${screenHeight.toInt()} '
+        'visívelFoto=${visiblePhotoW.toInt()}x${visiblePhotoH.toInt()} '
+        'cropSize=$cropSize');
+  } else {
+    // Fallback: sem metadados, usa 78% do menor lado da foto diretamente
+    final minDim = min(decoded.width, decoded.height);
+    cropSize = (minDim * 0.78).toInt();
+    cropX = (decoded.width - cropSize) ~/ 2;
+    cropY = (decoded.height - cropSize) ~/ 2;
+    print('[CameraCrop] Fallback sem metadados: cropSize=$cropSize');
+  }
+
+  final guideCircleCrop = img.copyCrop(
     decoded,
-    x: xMin,
-    y: yMin,
-    width: xMax - xMin,
-    height: yMax - yMin,
+    x: cropX,
+    y: cropY,
+    width: cropSize,
+    height: cropSize,
   );
 
-  final displayImg = croppedImage.width > 800
-      ? img.copyResize(croppedImage, width: 800)
-      : croppedImage;
+  // === Etapa 2: aplicar o mesmo pré-processamento do treino ===
+  //
+  // O ConvNeXt foi treinado com imagens processadas pelo findind_circles_01.py:
+  //   GaussianBlur → máscara HSV rosa → findContours → bounding rect + 70px padding
+  //
+  // Aplicamos o mesmo pipeline sobre o recorte do círculo guia (que já está centrado
+  // na amostra), garantindo que o modelo receba imagens no mesmo formato do treino.
+  //
+  // Se não detectar cor rosa (ex: câmera manual sem alizarol visível), usa o
+  // recorte do guia como fallback.
+  final training = cropLikeTraining(guideCircleCrop);
+  final finalCrop = training.found ? training.image : guideCircleCrop;
+
+  final displayImg = finalCrop.width > 800
+      ? img.copyResize(finalCrop, width: 800)
+      : finalCrop;
 
   return _PreparedAnalysisImage(
     displayBytes: Uint8List.fromList(img.encodeJpg(displayImg, quality: 90)),
-    croppedBytes: Uint8List.fromList(img.encodeJpg(croppedImage, quality: 95)),
-    circleFound: true, // Força true, pois o usuário centralizou pelo guia
+    croppedBytes: Uint8List.fromList(img.encodeJpg(finalCrop, quality: 95)),
+    circleFound: true, // Força true — o usuário centralizou pelo guia visual
     hasPink: true,     // Ignorado na câmera
   );
 }
@@ -205,14 +315,22 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _openCamera() async {
     if (_isProcessing) return;
-    final String? imagePath = await Navigator.push<String>(
+    final result = await Navigator.push<CameraCaptureResult>(
       context,
       MaterialPageRoute(
         builder: (_) => CameraScreen(onImageCaptured: (path) => path),
       ),
     );
-    if (imagePath != null && mounted) {
-      await _processImage(File(imagePath), isFromCamera: true);
+    if (result != null && mounted) {
+      // Passa os metadados do preview para o crop correto
+      await _processImage(
+        File(result.path),
+        isFromCamera: true,
+        previewWidth: result.previewWidth,
+        previewHeight: result.previewHeight,
+        screenWidth: result.screenWidth,
+        screenHeight: result.screenHeight,
+      );
     }
   }
 
@@ -231,7 +349,14 @@ class _HomeScreenState extends State<HomeScreen> {
   // já lida com a conversão via encodeJpg/imdecode internamente.
   // Converter antes quebraria a detecção de cor HSV.
 
-  Future<void> _processImage(File imageFile, {bool isFromCamera = false}) async {
+  Future<void> _processImage(
+    File imageFile, {
+    bool isFromCamera = false,
+    double previewWidth = 0,
+    double previewHeight = 0,
+    double screenWidth = 0,
+    double screenHeight = 0,
+  }) async {
     if (!mounted) return;
     setState(() => _isProcessing = true);
 
@@ -240,11 +365,23 @@ class _HomeScreenState extends State<HomeScreen> {
       await Future<void>.delayed(const Duration(milliseconds: 80));
 
       final bytes = await imageFile.readAsBytes();
-      
-      final prepared = await compute(
-        isFromCamera ? _prepareCameraImage : _prepareAnalysisImage,
-        bytes,
-      );
+
+      final _PreparedAnalysisImage prepared;
+      if (isFromCamera) {
+        // Passa os metadados do preview para calcular o recorte correto com BoxFit.cover
+        prepared = await compute(
+          _computeCameraImage,
+          _CameraImageArgs(
+            bytes: bytes,
+            previewWidth: previewWidth,
+            previewHeight: previewHeight,
+            screenWidth: screenWidth,
+            screenHeight: screenHeight,
+          ),
+        );
+      } else {
+        prepared = await compute(_prepareAnalysisImage, bytes);
+      }
 
       // 2. Salva imagem recortada para exibição no dashboard
       final tempDir = Directory.systemTemp;

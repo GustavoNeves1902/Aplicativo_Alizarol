@@ -34,6 +34,124 @@ import 'dart:math';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// RECORTE IGUAL AO TREINO (espelho do findind_circles_01.py)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Replica exatamente o pré-processamento do script Python [findind_circles_01.py]
+/// utilizado no treinamento do ConvNeXt:
+///   1. GaussianBlur (5×5)
+///   2. Máscara HSV rosa/vermelho (mesmos limiares do treino)
+///   3. morphologyEx CLOSE → OPEN (limpa ruídos, fecha buracos)
+///   4. findContours → maior contorno → bounding rect
+///   5. Crop com padding = 70px
+///
+/// Retorna `({image, found})`:
+///   • found = true  → imagem recortada ao redor da mancha de alizarol
+///   • found = false → imagem original (fallback, sem alizarol detectado)
+({img.Image image, bool found}) cropLikeTraining(img.Image image) {
+  cv.Mat? mat;
+  cv.Mat? blurred;
+  cv.Mat? hsv;
+  cv.Mat? mask1;
+  cv.Mat? mask2;
+  cv.Mat? mask;
+  cv.Mat? kernel;
+
+  try {
+    mat = _imgToMat(image);
+
+    // 1. GaussianBlur (5×5) — igual ao Python: cv2.GaussianBlur(img, (5,5), 0)
+    blurred = cv.gaussianBlur(mat, (5, 5), 0);
+
+    // 2. BGR → HSV
+    hsv = cv.cvtColor(blurred, cv.COLOR_BGR2HSV);
+
+    // 3. Máscaras HSV (mesmos limiares do findind_circles_01.py)
+    mask1 = cv.inRange(
+      hsv,
+      cv.Mat.fromList(1, 3, cv.MatType.CV_8UC1, [0,   30,  50]),
+      cv.Mat.fromList(1, 3, cv.MatType.CV_8UC1, [10,  255, 255]),
+    );
+    mask2 = cv.inRange(
+      hsv,
+      cv.Mat.fromList(1, 3, cv.MatType.CV_8UC1, [160, 30,  50]),
+      cv.Mat.fromList(1, 3, cv.MatType.CV_8UC1, [180, 255, 255]),
+    );
+
+    // União das faixas
+    mask = cv.Mat.zeros(mat.rows, mat.cols, cv.MatType.CV_8UC1);
+    cv.bitwiseOR(mask1, mask2, dst: mask);
+
+    // 4. morphologyEx CLOSE → OPEN (fecha buracos, depois remove ruídos pequenos)
+    kernel = cv.getStructuringElement(cv.MORPH_RECT, (5, 5));
+    mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, kernel);
+    mask = cv.morphologyEx(mask, cv.MORPH_OPEN, kernel);
+
+    // 5. Encontrar contornos
+    final (contours, hierarchy) = cv.findContours(
+      mask,
+      cv.RETR_EXTERNAL,
+      cv.CHAIN_APPROX_SIMPLE,
+    );
+    hierarchy.dispose();
+
+    if (contours.isEmpty) {
+      print('[Detector] cropLikeTraining: nenhum contorno encontrado.');
+      return (image: image, found: false);
+    }
+
+    // Maior contorno por área (igual ao Python: max(contours, key=cv2.contourArea))
+    cv.VecPoint? largest;
+    double largestArea = 0;
+    for (int i = 0; i < contours.length; i++) {
+      final area = cv.contourArea(contours[i]);
+      if (area > largestArea) {
+        largestArea = area;
+        largest = contours[i];
+      }
+    }
+
+    if (largest == null || largestArea < 100) {
+      print('[Detector] cropLikeTraining: contorno muito pequeno ($largestArea px²).');
+      return (image: image, found: false);
+    }
+
+    // Bounding rect do maior contorno
+    final rect = cv.boundingRect(largest);
+    const int padding = 70;
+    final xMin = max(0, rect.x - padding);
+    final yMin = max(0, rect.y - padding);
+    final xMax = min(image.width,  rect.x + rect.width  + padding);
+    final yMax = min(image.height, rect.y + rect.height + padding);
+
+    print('[Detector] cropLikeTraining: área=$largestArea '
+        'rect=(${rect.x},${rect.y},${rect.width},${rect.height}) '
+        'crop=($xMin,$yMin,${xMax - xMin},${yMax - yMin})');
+
+    final cropped = img.copyCrop(
+      image,
+      x: xMin,
+      y: yMin,
+      width: xMax - xMin,
+      height: yMax - yMin,
+    );
+
+    return (image: cropped, found: true);
+  } catch (e) {
+    print('[Detector] Erro cropLikeTraining: $e');
+    return (image: image, found: false);
+  } finally {
+    mat?.dispose();
+    blurred?.dispose();
+    hsv?.dispose();
+    mask1?.dispose();
+    mask2?.dispose();
+    mask?.dispose();
+    kernel?.dispose();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // VALIDAÇÃO DA COR ROSA/VERMELHO (ALIZAROL)
 // ─────────────────────────────────────────────────────────────────────────────
 
